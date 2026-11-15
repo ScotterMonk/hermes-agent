@@ -1024,6 +1024,10 @@ prompt_caching:
 #     enabled: true            # false = skip automatic forks (/refine still works)
 #     provider: "auto"         # or pin a cheaper model (see memory.md)
 #     model: ""
+#     skill_scope: all         # all (default) | local: forked writers (this review, /refine,
+#                              # the curator) may change only this profile's own skills folder;
+#                              # writes to skills.external_dirs or an outside create_dir are
+#                              # staged for /skills pending instead. Your own turns are unaffected.
 
 # =============================================================================
 # Persistent Memory

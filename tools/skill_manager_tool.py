@@ -33,6 +33,7 @@ from tools.skill_manager_guards import (
     _containing_skills_root, _curator_consolidation_delete_guard, _is_path_redirect, _pinned_guard,
     _validate_delete_target, _is_background_review, _refusal as _err, _batch_binding_error,
     _note_batch_create, _note_batch_write)
+from tools.skill_manager_scope import refuse_outside
 from tools.skill_manager_batch import (
     _PATCH_EITHER_OR, _PATCH_NEEDS_NEW_STRING, _PATCH_NEEDS_OLD_STRING, _op_shape_error, _skill_manage_batch)
 from tools.skill_manager_scan import (
@@ -418,6 +419,9 @@ def _locate_for_write(name: str, action: str, not_found_suffix: str = ""):
     if binding := _batch_binding_error(name, skill_dir):  # a batch op acts only in the folder it checked
         return None, binding
     guard = _background_review_delete_guard(name, skill_dir) if action == "delete" else None
+    # skill_scope: checked on the folder this handler will write, so a name that now resolves
+    # elsewhere is refused rather than followed.
+    guard = guard or refuse_outside(action, name, skill_dir)
     return (None, guard) if guard else (skill_dir, None)
 
 
@@ -495,6 +499,8 @@ def _create_skill(name: str, content: str, category: str | None = None) -> dict[
     skill_dir = _resolve_skill_dir(name, category)
     if binding := _batch_binding_error(name, skill_dir):  # a batch create makes only the folder planned
         return binding
+    if refusal := refuse_outside("create", name, skill_dir):  # skill_scope, on the folder created
+        return refusal
     from hermes_constants import mkdir_under_hermes_home
     mkdir_under_hermes_home(skill_dir.parent)
     try:
@@ -696,15 +702,17 @@ _skill_gate_bypass: _ctxvars.ContextVar[bool] = _ctxvars.ContextVar(
     "skill_gate_bypass", default=False)
 
 
-def _run_write_gate(build_staging):
+def _run_write_gate(build_staging, targets=None):
     """Shared write gate: None to proceed, else a JSON tool result (blocked/staged).
-    ``build_staging(wa) -> (payload, gist)`` runs only when staging. Fails open if
-    write_approval cannot be imported."""
+    ``build_staging(wa) -> (payload, gist)`` runs only when staging; ``targets`` lists the
+    ``(action, name, category)`` it changes, for ``skill_scope``. Fails open if write_approval
+    cannot be imported."""
     try:
         from tools import write_approval as wa
     except Exception:
         return None  # fail open
-    decision = wa.evaluate_gate(wa.SKILLS)
+    from tools.skill_manager_scope import shared_target_check
+    decision = wa.evaluate_gate(wa.SKILLS, skill_target_is_shared=shared_target_check(targets))
     if decision.allow:
         return None
     if decision.blocked:
@@ -725,7 +733,7 @@ def _apply_skill_write_gate(action, name, **payload_kwargs):
         gist_kw = {k: payload_kwargs.get(k) or ""
                    for k in ("content", "file_path", "old_string", "new_string")}
         return payload, wa.skill_gist(action, name, **gist_kw)
-    return _run_write_gate(_staging)
+    return _run_write_gate(_staging, targets=[(action, name, payload_kwargs.get("category"))])
 
 
 _FLAT_OP_KEYS = ("content", "category", "file_path", "file_content", "old_string", "new_string",

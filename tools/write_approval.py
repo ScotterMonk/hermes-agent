@@ -25,7 +25,7 @@ import uuid
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from hermes_constants import get_hermes_home
 from utils import atomic_json_write
@@ -54,6 +54,12 @@ BACKGROUND_SCOPE_WORDS = frozenset({SCOPE_BACKGROUND, "background_review", "back
 # origin added later — is outside this set, so a ``background`` scope keeps gating it.
 _FOREGROUND_ORIGINS = frozenset({"foreground", "assistant_tool"})
 _TRUTHY_STRINGS = frozenset({"on", "true", "yes", "1", "approve", "enabled"})
+# ``auxiliary.background_review.skill_scope``: ``local`` makes every skill root but the profile's own
+# skills folder proposal-only to forked writers (their writes there are staged, whatever
+# ``skills.write_approval`` says); ``all`` (unset) keeps today's behavior.
+SKILL_SCOPE_KEY = "skill_scope"
+SKILL_SCOPE_ALL = "all"
+SKILL_SCOPE_LOCAL = "local"
 
 
 # --- Config resolution ---
@@ -81,6 +87,28 @@ def write_approval_scope(subsystem: str) -> str:
     if isinstance(raw, str) and raw.strip().lower() in BACKGROUND_SCOPE_WORDS:
         return SCOPE_BACKGROUND
     return SCOPE_ALL
+
+
+def background_skill_scope() -> str:
+    """``auxiliary.background_review.skill_scope``: unset, empty, null or ``all`` is ``all`` (today);
+    ``local`` is ``local``. Any other value (a typo, a number, a list) and an unreadable config read as
+    ``local``, with a warning: a mistyped opt-in must never stage less than the user asked for."""
+    try:
+        from hermes_cli.config import load_config, cfg_get
+        raw = cfg_get(load_config(), "auxiliary", "background_review", SKILL_SCOPE_KEY, default=None)
+    except Exception:
+        logger.warning("Could not read auxiliary.background_review.%s; treating it as '%s'",
+                       SKILL_SCOPE_KEY, SKILL_SCOPE_LOCAL, exc_info=True)
+        return SKILL_SCOPE_LOCAL
+    if raw is None:
+        return SKILL_SCOPE_ALL
+    if isinstance(raw, str) and raw.strip().lower() in {"", SKILL_SCOPE_ALL}:
+        return SKILL_SCOPE_ALL
+    if isinstance(raw, str) and raw.strip().lower() == SKILL_SCOPE_LOCAL:
+        return SKILL_SCOPE_LOCAL
+    logger.warning("Unknown auxiliary.background_review.%s %r; treating it as '%s'",
+                   SKILL_SCOPE_KEY, raw, SKILL_SCOPE_LOCAL)
+    return SKILL_SCOPE_LOCAL
 
 
 def _normalize_enabled(value: Any) -> bool:
@@ -218,23 +246,37 @@ def _slash_review_surface() -> bool:
     return platform not in {"webhook", "msgraph_webhook", "api_server"}
 
 
-def _staged(subsystem: str) -> GateDecision:
+def _staged(subsystem: str, reason: str = "") -> GateDecision:
     command = f"/{subsystem} pending"
     if _slash_review_surface():
         where = f"review with {command}"
     else:
         where = (f"pending records live in {_pending_path(subsystem, '').parent} "
                  f"(review from an interactive CLI session with {command})")
-    return GateDecision(stage=True, message=(f"Staged for approval ({subsystem}.write_approval is on). "
-                                             f"Not yet saved — {where}."))
+    reason = reason or f"{subsystem}.write_approval is on"
+    return GateDecision(stage=True, message=f"Staged for approval ({reason}). Not yet saved — {where}.")
 
 
-def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: str = "") -> GateDecision:
-    """Decide what to do with a pending write: gate off → allow; scope ``background`` + the user's own
-    turn → allow; gate on + skills (any origin) or background → stage; gate on + memory + foreground →
-    inline prompt when an interactive channel exists, else stage. The gate only ever delays a write,
-    never silently refuses it; ``blocked`` is produced only when the user actively denies the inline
-    prompt."""
+def is_forked_writer() -> bool:
+    """Whether the current write comes from a forked agent rather than the user's own turn (allowlist:
+    an origin this module has never heard of counts as a fork)."""
+    return current_origin() not in _FOREGROUND_ORIGINS
+
+
+def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: str = "",
+                  skill_target_is_shared: Optional[Callable[[], bool]] = None) -> GateDecision:
+    """Decide what to do with a pending write: a forked writer's skill write to a root outside the
+    profile's own skills folder under ``skill_scope: local`` → stage; gate off → allow; scope
+    ``background`` + the user's own turn → allow; gate on + skills (any origin) or background → stage;
+    gate on + memory + foreground → inline prompt when an interactive channel exists, else stage. The
+    gate only ever delays a write, never silently refuses it; ``blocked`` is produced only when the user
+    actively denies the inline prompt. ``skill_target_is_shared`` is called only for a forked writer
+    under ``local``, so the default path does no extra lookup."""
+    if (subsystem == SKILLS and skill_target_is_shared is not None
+            and is_forked_writer()
+            and background_skill_scope() == SKILL_SCOPE_LOCAL and skill_target_is_shared()):
+        return _staged(SKILLS, "auxiliary.background_review.skill_scope is local and the skill lives "
+                               "outside this profile's skills folder")
     if not write_approval_enabled(subsystem):
         return GateDecision(allow=True)
     origin = current_origin()
