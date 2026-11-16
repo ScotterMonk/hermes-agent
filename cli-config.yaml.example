@@ -1023,7 +1023,9 @@ prompt_caching:
 #   background_review:
 #     enabled: true            # false = skip automatic forks (/refine still works)
 #     provider: "auto"         # or pin a cheaper model (see memory.md)
-#     model: ""
+#     model: ""                # or fallback[N]: your Nth fallback_providers entry (0 = first)
+#     context: "auto"          # auto | digest | full: what the review replays (auto: digest
+#                              # on another model, full conversation on the main model)
 
 # =============================================================================
 # Persistent Memory

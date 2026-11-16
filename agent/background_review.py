@@ -12,6 +12,7 @@ import copy
 import json
 import logging
 import os
+import re
 import threading
 import time
 from contextlib import contextmanager, suppress
@@ -346,11 +347,27 @@ def _resolve_review_runtime(agent: Any, task_cfg: Optional[dict[str, Any]] = Non
     task_provider, task_model, task_base_url, task_api_key = (
         str(task.get(key, "")).strip() or None for key in ("provider", "model", "base_url", "api_key")
     )
+    slot_entry: Optional[dict[str, Any]] = None
+    slot = task_model if task_model and task_model.lower().startswith("fallback[") else None
+    if slot:  # the parent's Nth fallback entry; every step that reads it is inside the failure boundary
+        try:
+            slot_entry = _fallback_slot_entry(agent, slot, task_provider)
+            if slot_entry is not None:
+                task_provider, task_model = str(slot_entry["provider"]).strip(), str(slot_entry["model"]).strip()
+                task_base_url = str(slot_entry.get("base_url") or "").strip() or None
+        except (ValueError, TypeError, KeyError, AttributeError) as e:  # what YAML-shaped entry values raise,
+            _warn_review_routing_fallback(agent, task_provider or "", slot, e)  # e.g. str() of a huge int
+            return parent
+        if slot_entry is None:
+            return parent
     if not (task_provider and task_provider != "auto" and task_model) or (
         task_provider == (agent.provider or "") and task_model == (agent.model or "")  # same as parent
     ):
         return parent
     try:
+        if slot_entry is not None:  # inside the boundary: a failed key lookup warns and reviews on the main model
+            from hermes_cli.fallback_config import resolve_entry_api_key
+            task_api_key = resolve_entry_api_key(slot_entry)
         from hermes_cli.runtime_provider import resolve_runtime_provider
         rp = resolve_runtime_provider(
             requested=task_provider, target_model=task_model,
@@ -363,8 +380,68 @@ def _resolve_review_runtime(agent: Any, task_cfg: Optional[dict[str, Any]] = Non
             "args": list(rp.get("args") or []), "routed": True,
         }
     except Exception as e:
-        _warn_review_routing_fallback(agent, task_provider, task_model, e)
+        _warn_review_routing_fallback(agent, task_provider, f"{task_model} ({slot})" if slot else task_model, e)
         return parent
+
+
+_FALLBACK_SLOT = re.compile(r"fallback\[([0-9]+)\]", re.IGNORECASE | re.ASCII)
+
+
+def _slot_index(slot: str, chain_len: int) -> tuple[bool, Optional[int]]:
+    """Parse ``fallback[N]``: (well formed, index if 0 <= N < chain_len else None).
+
+    N is ASCII digits only; other scripts' digits (which ``\\d`` and ``int()`` would accept) make the
+    value malformed, so every accepted spelling of an index means the same entry. The index is never
+    converted from more digits than the chain length has, so no length of N can raise.
+    """
+    match = _FALLBACK_SLOT.fullmatch(slot)
+    if match is None:
+        return False, None
+    digits = match.group(1).lstrip("0") or "0"
+    if len(digits) > len(str(chain_len)) or int(digits) >= chain_len:
+        return True, None
+    return True, int(digits)
+
+
+def _fallback_slot_entry(agent: Any, slot: str, task_provider: Optional[str]) -> Optional[dict[str, Any]]:
+    """The parent's fallback entry ``slot`` (``fallback[N]``, 0 = first) names, or None after warning
+    loudly (#156124 item 3: a missing slot must never silently pick another route). The slot's own
+    provider is used; a ``provider`` set beside it is ignored, and the log says so."""
+    chain = getattr(agent, "_fallback_chain", None) or []
+    well_formed, index = _slot_index(slot, len(chain))
+    entry = chain[index] if index is not None else None
+    provider = str((entry or {}).get("provider") or "").strip()
+    if not well_formed:
+        problem = "not a fallback slot; use fallback[N] with N in ASCII digits, N = 0 for the first fallback_providers entry"
+    elif entry is None:
+        problem = f"no such fallback_providers entry ({len(chain)} configured; fallback[0] is the first)"
+    elif not provider or not str(entry.get("model") or "").strip():
+        problem = "that fallback_providers entry has a blank provider or model"
+    elif provider.lower() == "auto":
+        problem = "that fallback_providers entry has provider 'auto', which names no route"
+    else:
+        if task_provider and task_provider.lower() != "auto" and not getattr(agent, "_warned_bg_review_slot_provider", False):
+            agent._warned_bg_review_slot_provider = True
+            logger.warning("provider=%r set beside model %r is ignored: a fallback slot brings its own provider.",
+                           task_provider, slot)  # task-neutral: /btw and plugin forks share this resolver
+        return entry
+    _warn_review_routing_fallback(agent, task_provider or "", slot, ValueError(problem))
+    return None
+
+
+def _replays_digest(routed: bool, task_cfg: Optional[dict[str, Any]]) -> bool:
+    """Whether the fork replays a digest: ``auxiliary.background_review.context`` ``digest``/``full``
+    decides; unset or ``auto`` keeps the default (digest when routed, since the cache is cold anyway;
+    the full warm snapshot on the main model). Anything else warns and keeps the default."""
+    raw = _background_review_task_config(task_cfg).get("context")
+    mode = raw.strip().lower() if isinstance(raw, str) else raw
+    if mode in (None, "", "auto"):
+        return routed
+    if mode in ("digest", "full"):
+        return mode == "digest"
+    logger.warning("auxiliary.background_review.context=%r is not auto, digest or full; using auto (%s).",
+                   raw, "digest" if routed else "full")
+    return routed
 
 
 def _warn_review_routing_fallback(agent: Any, task_provider: str, task_model: str, error: Exception) -> None:
@@ -375,15 +452,14 @@ def _warn_review_routing_fallback(agent: Any, task_provider: str, task_model: st
     logger.warning(
         "auxiliary.background_review.provider=%r (model %r) could not be resolved: %s — background reviews "
         "run on the main model %s/%s instead.", task_provider, task_model, error_line, agent.provider, agent.model)
-    message = t("display.review.routing_fallback_warning", task_provider=task_provider, task_model=task_model,
-                error=error_line, provider=agent.provider, model=agent.model)
     if getattr(agent, "_warned_bg_review_routing", False):
         return
     agent._warned_bg_review_routing = True
     emit = getattr(agent, "_emit_warning", None)
     if callable(emit):
-        with suppress(Exception):
-            emit(message)
+        with suppress(Exception):  # best effort: the log line above is the record; a failing notice must not
+            emit(t("display.review.routing_fallback_warning", task_provider=task_provider,  # abort the review
+                   task_model=task_model, error=error_line, provider=agent.provider, model=agent.model))
 
 
 def _parent_can_emit_tool_calls(agent: Any) -> bool:
@@ -1239,6 +1315,7 @@ class _ReviewForkState:
     review_agent: Any = None
     review_messages: list[dict] = field(default_factory=list)
     review_usage: dict[str, Any] = field(default_factory=dict)
+    route: Optional[tuple[str, str]] = None  # (provider, model) when the review ran on another model
 
 
 def _release_fork_clients(review_agent: Any) -> None:
@@ -1274,6 +1351,7 @@ def _run_review_fork(
     attended, so the unattended-only memory delete gate leaves the full operation set available."""
     st.review_agent, _rt, _routed = build_cache_parity_fork(
         agent, task_cfg, max_iterations=_REVIEW_MAX_ITERATIONS)
+    st.route = (str(_rt.get("provider") or ""), str(_rt.get("model") or "")) if _routed else None
     st.review_agent._review_attended = explicit
     _track_review_fork(agent, st.review_agent, register=True)
     from hermes_cli.plugins import set_thread_tool_whitelist, clear_thread_tool_whitelist
@@ -1300,14 +1378,16 @@ def _run_review_fork(
         _reset_background_review_read_marks()
     try:
         if review_run is None or review_run.begin_request(st.review_agent):
-            # Routed -> digest (cache cold anyway); same model -> full snapshot (warm cache reads).
+            # Default: routed -> digest (cache cold anyway); same model -> full snapshot (warm cache
+            # reads). ``context: digest|full`` overrides either way.
             st.review_agent.run_conversation(
                 user_message=(
                     prompt + "\n\nYou can only call " + memory_phrase_prompt +
                     "management tools. Other tools will be denied "
                     "at runtime — do not attempt them." + prompt_extra
                 ),
-                conversation_history=_digest_history(messages_snapshot) if _routed else messages_snapshot,
+                conversation_history=(_digest_history(messages_snapshot) if _replays_digest(_routed, task_cfg)
+                                      else messages_snapshot),
             )
     finally:
         clear_thread_tool_whitelist()
@@ -1326,12 +1406,15 @@ def _run_review_fork(
     st.review_agent = None
 
 
-def _publish_review_summary(agent: Any, actions: list[str]) -> None:
+def _publish_review_summary(agent: Any, actions: list[str], route: Optional[tuple[str, str]] = None) -> None:
+    """``route``: the (provider, model) a review on another model ran on; the summary names it so the
+    user can see which reviewer made the change. A main-model review prints the plain line."""
     summary = " · ".join(dict.fromkeys(actions))
-    agent._safe_print(t("display.review.summary_cli", summary=summary))
+    suffix, extra = ("_routed", {"provider": route[0], "model": route[1]}) if route else ("", {})
+    agent._safe_print(t("display.review.summary_cli" + suffix, summary=summary, **extra))
     if agent.background_review_callback:
         with suppress(Exception):
-            agent.background_review_callback(t("display.review.summary_callback", summary=summary))
+            agent.background_review_callback(t("display.review.summary_callback" + suffix, summary=summary, **extra))
 
 
 def _run_review_in_thread(
@@ -1400,7 +1483,7 @@ def _run_review_in_thread(
             actions = []
         _log_review_completion(st.review_usage, _classify_review_result(actions))
         if actions:
-            _publish_review_summary(agent, actions)
+            _publish_review_summary(agent, actions, st.route)
     except Exception as e:
         logger.warning("Background memory/skill review failed: %s", e)
         if st.review_usage:

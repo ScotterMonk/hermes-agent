@@ -3571,6 +3571,8 @@ display:
       user: "사용자 프로필"
     summary_cli: "  💾 자기 개선 리뷰: {summary}"
     summary_callback: "💾 자기 개선 리뷰: {summary}"
+    summary_cli_routed: "  💾 자기 개선 리뷰 ({model} · {provider}): {summary}"
+    summary_callback_routed: "💾 자기 개선 리뷰 ({model} · {provider}): {summary}"
     aux_failure_label: "백그라운드 리뷰"
   notice:
     uncompressed_context_overflow: "⚠️ 세션 컨텍스트(약 {tokens} 토큰)가 압축이 비활성화된 상태(compression.enabled: false)에서 모델 컨텍스트 창(약 {context_length} 토큰)을 초과했어요. /compact로 기록을 압축하거나 config.yaml에서 압축을 활성화해 주세요."

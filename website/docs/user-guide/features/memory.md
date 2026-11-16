@@ -423,6 +423,48 @@ identical and skill capture near-identical to the main-model review.
 Leave it at `auto` (or set it to your main model) and nothing changes — the
 review keeps running on the main model with the full warm-cache replay.
 
+### Reviewing with one of your fallback models (`model: fallback[N]`)
+
+Instead of naming a provider and model, you can point the review at an entry of
+your own `fallback_providers` list, so the reviewer follows the ranking you
+already keep:
+
+```yaml
+auxiliary:
+  background_review:
+    model: fallback[0]   # the first fallback_providers entry (fallback[1] = the second, ...)
+```
+
+The entry's provider, model, `base_url` and key (`api_key` or `key_env`) are used,
+exactly as when the main agent falls back to it; a `provider` set beside the slot
+is ignored (the log says so). If the slot does not exist (the list is shorter, or
+the value is not `fallback[N]`) or cannot be resolved, Hermes warns once in the
+session and in `agent.log` on every review, and the review runs on the main
+model. A slot that names your main model is the same as `auto`.
+
+The same `fallback[N]` value works in the other blocks that share this route
+resolution: `auxiliary.side_question` (`/btw`) and plugin session forks. The
+`context` key below applies to background reviews only.
+
+### How much of the conversation the review sees (`context`)
+
+```yaml
+auxiliary:
+  background_review:
+    context: full   # auto (default) | digest | full
+```
+
+`auto` keeps the behavior above: the full conversation on the main model, a
+digest on any other model. `full` replays the whole conversation to a routed
+reviewer too, at the cost of uncached input on that model (the
+`max_input_tokens` budget below still applies); use it when a strong
+second-opinion model should review from what the main model saw, not a summary.
+`digest` replays the digest even on the main model. Any other value logs a
+warning and behaves as `auto`.
+
+When the review runs on a model other than your main one, its summary line
+names that model and provider, so you can see which reviewer made a change.
+
 ### Same-model review reasoning
 
 A review using the same model as the parent **always inherits the parent's reasoning effort**. Setting `auxiliary.background_review.reasoning_effort` does not override it, whether the route is `auto` or explicitly selects the parent provider/model.

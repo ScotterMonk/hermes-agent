@@ -3571,6 +3571,8 @@ display:
       user: "Benutzerprofil"
     summary_cli: "  💾 Selbstverbesserungs-Review: {summary}"
     summary_callback: "💾 Selbstverbesserungs-Review: {summary}"
+    summary_cli_routed: "  💾 Selbstverbesserungs-Review ({model} · {provider}): {summary}"
+    summary_callback_routed: "💾 Selbstverbesserungs-Review ({model} · {provider}): {summary}"
     aux_failure_label: "Hintergrund-Review"
   notice:
     uncompressed_context_overflow: "⚠️ Der Sitzungskontext (~{tokens} Tokens) überschreitet das Kontextfenster des Modells (~{context_length} Tokens), während die Komprimierung deaktiviert ist (compression.enabled: false). Verwenden Sie /compact, um den Verlauf zu komprimieren, oder aktivieren Sie die Komprimierung in config.yaml."

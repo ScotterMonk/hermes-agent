@@ -3571,6 +3571,8 @@ display:
       user: "Профиль пользователя"
     summary_cli: "  💾 Ревью самосовершенствования: {summary}"
     summary_callback: "💾 Ревью самосовершенствования: {summary}"
+    summary_cli_routed: "  💾 Ревью самосовершенствования ({model} · {provider}): {summary}"
+    summary_callback_routed: "💾 Ревью самосовершенствования ({model} · {provider}): {summary}"
     aux_failure_label: "фоновое ревью"
   notice:
     uncompressed_context_overflow: "⚠️ Контекст сеанса (~{tokens} токенов) превышает контекстное окно модели (~{context_length} токенов), а сжатие отключено (compression.enabled: false). Используйте /compact, чтобы сжать историю, или включите сжатие в config.yaml."

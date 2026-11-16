@@ -3571,6 +3571,8 @@ display:
       user: "الملف التعريفي للمستخدم"
     summary_cli: "  💾 مراجعة التحسين الذاتي: {summary}"
     summary_callback: "💾 مراجعة التحسين الذاتي: {summary}"
+    summary_cli_routed: "  💾 مراجعة التحسين الذاتي ({model} · {provider}): {summary}"
+    summary_callback_routed: "💾 مراجعة التحسين الذاتي ({model} · {provider}): {summary}"
     aux_failure_label: "المراجعة في الخلفية"
   notice:
     uncompressed_context_overflow: "⚠️ سياق الجلسة (~{tokens} رمزًا) يتجاوز نافذة سياق النموذج (~{context_length} رمزًا) مع تعطيل الضغط (compression.enabled: false). استخدم /compact لضغط السجل أو فعّل الضغط في config.yaml."
