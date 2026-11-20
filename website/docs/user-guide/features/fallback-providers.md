@@ -467,5 +467,6 @@ To keep fallback for a job, leave it unpinned and choose its model with `cron.mo
 | Approval classification | Layered (see above) | `auxiliary.approval` |
 | Title generation | Layered (see above) | `auxiliary.title_generation` |
 | Triage specifier | Layered (see above) | `auxiliary.triage_specifier` |
+| Background review (also `/refine`) | On the main model: the session's own chain, unless `fallback_chain` is declared. On its own `provider` / `model`: `fallback_chain` (if set) → main agent model, never the session's chain. `fallback_chain: []` disables fallback on both | `auxiliary.background_review.fallback_chain` |
 | Delegation | Uses `delegation.fallback_providers` when declared; otherwise only unpinned children inherit the parent chain | `delegation.provider` / `delegation.model` / `delegation.fallback_providers` |
 | Cron jobs | Unpinned jobs inherit the configured `fallback_providers` chain; a job with its own `provider` / `model` / `base_url` never falls back to it | Per-job `provider` / `model`, or `cron.model` / `cron.model_provider` |

@@ -1021,7 +1021,8 @@ def _routed_reasoning_config(task_cfg: Optional[dict[str, Any]]) -> Optional[dic
 
 
 def _fork_init_kwargs(agent: Any, rt: dict[str, Any], routed: bool, max_iterations: int,
-                      task_cfg: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+                      task_cfg: Optional[dict[str, Any]] = None, *, owner: str = "background_review",
+                      ) -> dict[str, Any]:
     """AIAgent constructor kwargs for the review fork. skip_memory=True: an external memory plugin
     scoped to the parent's session_id would leak the harness prompt into the user's real memory
     namespace; built-in MEMORY.md/USER.md state is re-bound by the caller. Toolsets match the
@@ -1044,7 +1045,35 @@ def _fork_init_kwargs(agent: Any, rt: dict[str, Any], routed: bool, max_iteratio
         kwargs.update(_same_model_parity_kwargs(agent))
     elif (routed_cfg := _routed_reasoning_config(task_cfg)) is not None:
         kwargs["reasoning_config"] = routed_cfg
+    if chain := _review_fallback_chain(agent, task_cfg, routed, owner=owner):
+        kwargs["fallback_model"] = chain
     return kwargs
+
+
+def _review_fallback_chain(agent: Any, task_cfg: Optional[dict[str, Any]], routed: bool, *,
+                           owner: str = "background_review") -> Optional[list[dict[str, Any]]]:
+    """The fork's fallback chain (#93592), by the owner rule delegation and cron use
+    (``scoped_fallback_chain``). Unrouted, the fork IS the parent's runtime: it inherits the parent's
+    live chain (a deep copy: the fork's failover must never touch the parent's entries).
+    Routed, it is a pinned owner and never borrows that chain; it gets the documented auxiliary
+    order, the task's ``fallback_chain`` then the main agent model. The task is the caller's
+    (``auxiliary.background_review`` for reviews and /refine, ``auxiliary.side_question`` for /btw,
+    a plugin fork's own task block). A declared ``[]`` disables fallback on either path."""
+    from hermes_cli.fallback_config import _entry_identity, scoped_fallback_chain
+    declared = _background_review_task_config(task_cfg).get("fallback_chain")
+    inherited = copy.deepcopy(list(getattr(agent, "_fallback_chain", None) or []))
+    chain = scoped_fallback_chain(inherited, declared, pinned=routed, owner=f"{owner} fork")
+    if not routed or declared == []:
+        return chain
+    chain = list(chain or [])
+    provider, model = getattr(agent, "provider", None), getattr(agent, "model", None)
+    if provider and model:  # the parent's live primary (what _current_main_runtime reports)
+        main = {"provider": provider, "model": model}
+        if base_url := (getattr(agent, "base_url", None) or ""):
+            main["base_url"] = base_url  # no credential: activation resolves it (bind_route_entry)
+        if _entry_identity(main) not in {_entry_identity(entry) for entry in chain}:
+            chain.append(main)
+    return chain or None
 
 
 # Above any live registry generation: _publish_tool_snapshot refuses an older-generation rebuild,
@@ -1085,7 +1114,7 @@ def build_cache_parity_fork(
     # (_routed_reasoning_config).
     if not _routed and write_origin == "background_review":
         _warn_ignored_reasoning_effort(agent, task_cfg)
-    review_agent = AIAgent(**_fork_init_kwargs(agent, _rt, _routed, max_iterations, task_cfg))
+    review_agent = AIAgent(**_fork_init_kwargs(agent, _rt, _routed, max_iterations, task_cfg, owner=write_origin))
     # A same-route fork shares the parent's warmed prefix; a routed fork's own prefix is never warmed.
     review_agent._skip_prompt_cache_warming = True
     if _routed and getattr(review_agent, "_cache_ttl", None) == "1h":
